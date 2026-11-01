@@ -1,0 +1,11 @@
+Auth package contract
+
+Construct with auth.NewHandler(db, credentials, config, exchanger), where db is *sql.DB, credentials implements auth.CredentialStore (typically *auth.FileCredentialStore), config is auth.OAuthConfig, and exchanger implements auth.OAuthExchanger. Mount using handler.RegisterRoutes(mux) or auth.RegisterRoutes(mux, handler).
+
+Routes:
+- POST /api/auth/cookie with JSON {"name":"...","base_url":"...","cookie":"..."}; returns 201 with account id/name/base_url/auth_type.
+- POST /api/auth/oauth with JSON {"name":"...","base_url":"...","scopes":[...]}; returns 202 with authorization URL and loopback callback URL. OAuth uses state and PKCE S256; the loopback callback exchanges the code before atomically creating the account and encrypted token row.
+
+The shared account API owns list, activation, removal and account selection/logout routes. Auth exposes account lifecycle methods via EncryptedStore for integration when desired.
+
+Credential rows use oauth_tokens(account_id, encrypted_access_token, encrypted_refresh_token, encrypted_cookie, encrypted_credentials, token_expires_at, updated_at). Populated token and cookie columns contain packed nonce plus authenticated ciphertext; the complete packed ciphertext is stored in encrypted_credentials. Ciphertexts are sealed with the account ID as associated data.

@@ -1,0 +1,8 @@
+*.db
+*.db-shm
+*.db-wal
+cookies.txt
+bilibili-cookies.txt
+credentials.key
+/index.json
+/videod

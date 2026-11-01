@@ -1,0 +1,7 @@
+# Backend store contract
+
+`store.Open(path)` opens SQLite and applies the base schema; `store.Migrate(ctx, db)` applies that schema to an existing handle. `store.Seed(ctx, db)` idempotently inserts demo account `demo`, 100 channels, 1,000 videos, 20 playlists (10 videos each), 50 watch-later rows, and 25 history rows. `store.AccountStore.List` lists accounts without credential material; `Activate` selects exactly one active account and returns `sql.ErrNoRows` for an unknown ID. `store.ActiveAccount` resolves the active account.
+
+Catalog REST routes are mounted with `api.New(db).Register(mux)`. Account selection accepts `?account_id=`; otherwise the active account is used. Collection endpoints accept `limit` (default 20, maximum 100) and `offset` (default 0). JSON errors have shape `{"error":"message"}`.
+
+Base tables: `accounts(id,name,base_url,auth_type,active,created_at)`, `oauth_tokens(account_id,encrypted_access_token,encrypted_refresh_token,encrypted_cookie,token_expires_at,updated_at)`, `channels(id,account_id,title,url,thumbnail,description)`, `videos(id,account_id,channel_id,title,url,thumbnail,duration,published_at,description)`, `playlists(id,account_id,title,description)`, `playlist_videos(playlist_id,video_id,position)`, `watch_later(account_id,video_id,added_at)`, `favorites(account_id,video_id,added_at)`, `history(account_id,video_id,watched_at,position)`, and `settings(account_id,key,value)`. Search uses FTS5 and triggers to keep video rows indexed.

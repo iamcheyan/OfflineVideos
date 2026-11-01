@@ -1,0 +1,11 @@
+[Unit]
+Description=Rebuild OfflineVideos JSON catalog hourly
+After=offlinevideos.service
+Requires=offlinevideos.service
+
+[Service]
+Type=oneshot
+User=offlinevideos
+Group=offlinevideos
+EnvironmentFile=/etc/offlinevideos/offlinevideos.env
+ExecStart=/usr/bin/curl --fail --silent --show-error --max-time 120 -X POST http://127.0.0.1:8732/api/catalog

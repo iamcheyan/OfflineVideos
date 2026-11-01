@@ -1,0 +1,11 @@
+[Unit]
+Description=Rebuild OfflineVideos catalog every hour
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+Persistent=true
+Unit=offlinevideos-index.service
+
+[Install]
+WantedBy=timers.target

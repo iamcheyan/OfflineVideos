@@ -1,0 +1,207 @@
+package media
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+// ErrPathOutsideLibrary reports a download row whose stored path escapes the
+// download root. Callers treat it as a client-visible rejection, not a storage
+// failure: the row is wrong, the disk is fine.
+var ErrPathOutsideLibrary = errors.New("media path outside library")
+
+func (s *Service) library(w http.ResponseWriter, r *http.Request) {
+	// An empty account_id means "every source". The offline library page shows
+	// one merged list, so it does not need to know which services exist before
+	// it can ask for anything.
+	accountParam := r.URL.Query().Get("account_id")
+	account := accountParam
+	if account == "" {
+		resolved, err := resolveAccount(r, s.db)
+		if err != nil {
+			apiError(w, 500, "account_unavailable", "active account unavailable")
+			return
+		}
+		account = resolved
+	}
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	filter := r.URL.Query().Get("filter")
+	sortBy := r.URL.Query().Get("sort")
+	order := "d.created_at DESC"
+	if sortBy == "title" {
+		order = "COALESCE(v.title,d.video_id) COLLATE NOCASE ASC"
+	} else if sortBy == "duration" {
+		order = "COALESCE(v.duration,0) DESC"
+	}
+	base := `SELECT COALESCE(v.id,d.video_id),d.account_id,COALESCE(v.channel_id,''),COALESCE(v.title,d.video_id),COALESCE(v.url,d.url),COALESCE(v.thumbnail,''),COALESCE(v.duration,0),COALESCE(v.published_at,''),COALESCE(v.description,''),d.mode,d.quality,d.output_path,COALESCE(m.since,'') FROM downloads d LEFT JOIN videos v ON v.id=d.video_id AND v.account_id=d.account_id LEFT JOIN remote_missing m ON m.video_id=d.video_id AND m.account_id=d.account_id WHERE d.state='completed' AND d.output_path<>''`
+	args := []any{}
+	if accountParam != "" {
+		base += ` AND d.account_id=?`
+		args = append(args, account)
+	}
+	if q != "" {
+		base += ` AND (COALESCE(v.title,d.video_id) LIKE ? OR COALESCE(v.description,'') LIKE ?)`
+		args = append(args, "%"+q+"%", "%"+q+"%")
+	}
+	if filter != "" {
+		base += ` AND d.mode=?`
+		args = append(args, filter)
+	}
+	rows, err := s.db.QueryContext(r.Context(), base+" ORDER BY "+order, args...)
+	if err != nil {
+		apiError(w, 500, "database_error", "unable to read offline library")
+		return
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var id, aid, cid, title, url, thumb, pub, desc, mode, quality, path, missingSince string
+		var duration int
+		if err := rows.Scan(&id, &aid, &cid, &title, &url, &thumb, &duration, &pub, &desc, &mode, &quality, &path, &missingSince); err != nil {
+			apiError(w, 500, "database_error", "unable to read offline library")
+			return
+		}
+		// remote_missing_since is only set when the source's list no longer
+		// contains the video, which is how a watched item is recognised. The
+		// app labels it and offers a delete; the file is never removed here.
+		out = append(out, map[string]any{"id": id, "account_id": aid, "channel_id": cid, "title": title, "url": url, "thumbnail": thumb, "duration": duration, "published_at": pub, "description": desc, "mode": mode, "quality": quality, "path": path, "remote_missing_since": missingSince})
+	}
+	if err := rows.Err(); err != nil {
+		apiError(w, 500, "database_error", "unable to read offline library")
+		return
+	}
+	writeJSON(w, 200, out)
+}
+
+// DeleteDownload removes the local file and the completed download row for one
+// video. It reports whether a file was actually removed.
+//
+// Path containment is enforced here rather than at the call site: the path
+// comes from the database, and a stale or hand-edited row must not be able to
+// delete anything outside the download root.
+// DeleteDownload removes a video's file and every queued/finished job row for
+// it. The bool reports whether a file was actually unlinked; callers that only
+// care about "the video is now clean" should treat a nil error as success.
+func (s *Service) DeleteDownload(ctx context.Context, account, videoID string) (bool, error) {
+	var path string
+	err := s.db.QueryRowContext(ctx, `SELECT output_path FROM downloads WHERE account_id=? AND video_id=? AND state='completed' ORDER BY created_at DESC LIMIT 1`, account, videoID).Scan(&path)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Nothing landed on disk, but failed or cancelled rows may still exist.
+		// Clearing them is what lets the video be queued again.
+		_, derr := s.db.ExecContext(ctx, `DELETE FROM downloads WHERE account_id=? AND video_id=?`, account, videoID)
+		return false, derr
+	}
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(path) == "" {
+		return false, nil
+	}
+	root, err := filepath.Abs(s.cfg.DownloadDir)
+	if err != nil {
+		return false, err
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil || !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
+		return false, fmt.Errorf("%w: %s", ErrPathOutsideLibrary, path)
+	}
+	removed := false
+	if err = os.Remove(abs); err != nil {
+		if !os.IsNotExist(err) {
+			return false, err
+		}
+	} else {
+		removed = true
+	}
+	// Drop every row for this video, not just the completed one. A leftover
+	// failed job would otherwise make the app treat the video as "already
+	// tried" and never queue it again, which breaks both the retry button and
+	// the delete-then-resync workflow.
+	if _, err = s.db.ExecContext(ctx, `DELETE FROM downloads WHERE account_id=? AND video_id=?`, account, videoID); err != nil {
+		return removed, err
+	}
+	return removed, nil
+}
+
+func (s *Service) deleteLibraryVideo(w http.ResponseWriter, r *http.Request) {
+	account, err := resolveAccount(r, s.db)
+	if err != nil {
+		apiError(w, 500, "account_unavailable", "active account unavailable")
+		return
+	}
+	id := r.PathValue("video_id")
+	removed, err := s.DeleteDownload(r.Context(), account, id)
+	if errors.Is(err, ErrPathOutsideLibrary) {
+		apiError(w, 400, "invalid_media_path", "media path outside library")
+		return
+	}
+	if err != nil {
+		apiError(w, 500, "storage_error", "unable to remove media")
+		return
+	}
+	// The row cleanup succeeded even when no file was on disk (a failed or
+	// cancelled job leaves rows behind), and the client's job is to end up with
+	// the video unblocked, so this is not a 404.
+	_ = removed
+	w.WriteHeader(http.StatusNoContent)
+}
+func (s *Service) mediaStream(w http.ResponseWriter, r *http.Request) {
+	account, err := resolveAccount(r, s.db)
+	if err != nil {
+		apiError(w, 500, "account_unavailable", "active account unavailable")
+		return
+	}
+	var path string
+	err = s.db.QueryRowContext(r.Context(), `SELECT output_path FROM downloads WHERE account_id=? AND video_id=? AND state='completed' AND output_path<>'' ORDER BY created_at DESC LIMIT 1`, account, r.PathValue("video_id")).Scan(&path)
+	if err != nil {
+		apiError(w, 404, "media_not_found", "offline media not found")
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		apiError(w, 404, "media_not_found", "offline media file missing")
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		apiError(w, 500, "storage_error", "unable to read media")
+		return
+	}
+	http.ServeContent(w, r, filepath.Base(path), st.ModTime(), f)
+}
+
+func (s *Service) markLibraryWatched(w http.ResponseWriter, r *http.Request) {
+	account, err := resolveAccount(r, s.db)
+	if err != nil {
+		apiError(w, 500, "account_unavailable", "active account unavailable")
+		return
+	}
+	id := r.PathValue("video_id")
+	if id == "" {
+		apiError(w, 400, "invalid_video_id", "video id is required")
+		return
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err = s.db.ExecContext(r.Context(),
+		`INSERT INTO remote_missing(account_id, video_id, since) VALUES(?,?,?)
+		 ON CONFLICT(account_id, video_id) DO NOTHING`,
+		account, id, now)
+	if err != nil {
+		apiError(w, 500, "database_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":     "ok",
+		"video_id":   id,
+		"account_id": account,
+		"watched":    true,
+	})
+}
