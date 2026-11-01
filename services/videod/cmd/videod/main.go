@@ -9,6 +9,7 @@ import (
 	"kanade/videod/internal/provider"
 	"kanade/videod/internal/store"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -93,10 +94,14 @@ func main() {
 	h.Register(mux)
 	media.RegisterRoutes(mux, ms)
 	auth.NewHandlers(auth.NewService(db, credentials, auth.OAuthConfig{}, nil)).RegisterRoutes(mux)
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	listener, e := net.Listen("tcp", addr)
+	if e != nil {
+		log.Fatal(e)
+	}
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		log.Printf("offlinevideos listening on %s", addr)
-		if x := srv.ListenAndServe(); x != nil && !errors.Is(x, http.ErrServerClosed) {
+		if x := srv.Serve(listener); x != nil && !errors.Is(x, http.ErrServerClosed) {
 			log.Printf("server: %v", x)
 		}
 	}()
