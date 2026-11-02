@@ -299,6 +299,9 @@ func (s *Service) run(ctx context.Context, j *job) {
 	j.State = "completed"
 	_ = s.persistLocked(j)
 	s.mu.Unlock()
+	if j.Mode == "video" {
+		s.extractAudioFallback(j)
+	}
 	if s.cfg.Notifier != nil {
 		var title string
 		if metadata != nil {
@@ -339,6 +342,102 @@ func (s *Service) queueCompletionNotice(account, title string) {
 		}
 	}()
 }
+func (s *Service) extractAudioFallback(completedJob *job) {
+	if completedJob == nil || completedJob.VideoID == "" {
+		return
+	}
+	var audioJob *job
+	if completedJob.Mode == "audio" {
+		audioJob = completedJob
+	} else if completedJob.Mode == "video" {
+		s.mu.Lock()
+		for _, candidate := range s.jobs {
+			if candidate.AccountID == completedJob.AccountID && candidate.VideoID == completedJob.VideoID && candidate.Mode == "audio" && candidate.State == "failed" {
+				audioJob = candidate
+				break
+			}
+		}
+		if audioJob == nil {
+			candidate := &job{AccountID: completedJob.AccountID, VideoID: completedJob.VideoID, Mode: "audio"}
+			if err := s.db.QueryRow(`SELECT id,url,audio_bitrate,quality,priority,error,output_path FROM downloads WHERE account_id=? AND video_id=? AND mode='audio' AND state='failed' ORDER BY id DESC LIMIT 1`, completedJob.AccountID, completedJob.VideoID).Scan(&candidate.ID, &candidate.URL, &candidate.AudioBitrate, &candidate.Quality, &candidate.Priority, &candidate.Error, &candidate.OutputPath); err == nil {
+				candidate.State = "failed"
+				audioJob = candidate
+				s.jobs[candidate.ID] = candidate
+			}
+		}
+		s.mu.Unlock()
+	} else {
+		return
+	}
+	if audioJob == nil {
+		return
+	}
+	var videoPath string
+	if err := s.db.QueryRow(`SELECT output_path FROM downloads WHERE account_id=? AND video_id=? AND mode='video' AND state='completed' AND output_path<>'' ORDER BY created_at DESC,id DESC LIMIT 1`, audioJob.AccountID, audioJob.VideoID).Scan(&videoPath); err != nil {
+		return
+	}
+	var existingMP3 int
+	if err := s.db.QueryRow(`SELECT count(*) FROM downloads WHERE account_id=? AND video_id=? AND mode='audio' AND state='completed' AND lower(output_path) LIKE '%.mp3'`, audioJob.AccountID, audioJob.VideoID).Scan(&existingMP3); err != nil || existingMP3 > 0 {
+		return
+	}
+
+	s.mu.Lock()
+	if s.closed || audioJob.State != "failed" {
+		s.mu.Unlock()
+		return
+	}
+	audioJob.State = "downloading"
+	if audioJob.OutputPath == "" {
+		audioJob.OutputPath = filepath.Join(s.cfg.DownloadDir, strings.TrimSuffix(filepath.Base(videoPath), filepath.Ext(videoPath))+".audio.mp3")
+	}
+	audioJob.Progress = 0
+	audioJob.Error = ""
+	_ = s.persistLocked(audioJob)
+	s.mu.Unlock()
+
+	if err := s.convertAudioToMP3(videoPath, audioJob.OutputPath, audioJob.AudioBitrate); err != nil {
+		s.mu.Lock()
+		audioJob.State = "failed"
+		audioJob.Error = "audio source failed; local extraction failed: " + err.Error()
+		audioJob.OutputPath = ""
+		_ = s.persistLocked(audioJob)
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Lock()
+	audioJob.State = "completed"
+	audioJob.Progress = 100
+	_ = s.persistLocked(audioJob)
+	s.mu.Unlock()
+}
+
+func (s *Service) convertAudioToMP3(videoPath, outputPath, bitrate string) error {
+	if outputPath == "" {
+		outputPath = filepath.Join(s.cfg.DownloadDir, filepath.Base(strings.TrimSuffix(videoPath, filepath.Ext(videoPath)))+".audio.mp3")
+	}
+	if bitrate == "" {
+		bitrate = "192"
+	}
+	tmpPath := outputPath + ".extracting.mp3"
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, s.cfg.FFmpegPath, "-nostdin", "-y", "-i", videoPath, "-vn", "-map", "0:a:0", "-codec:a", "libmp3lame", "-b:a", bitrate+"k", tmpPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = err.Error()
+		}
+		return fmt.Errorf("ffmpeg audio extraction: %s", message)
+	}
+	if err := os.Rename(tmpPath, outputPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("publish extracted audio: %w", err)
+	}
+	return nil
+}
+
 func (s *Service) finish(j *job, state string, err error) {
 	s.mu.Lock()
 	j.State = state
@@ -348,6 +447,9 @@ func (s *Service) finish(j *job, state string, err error) {
 	j.cmd = nil
 	_ = s.persistLocked(j)
 	s.mu.Unlock()
+	if state == "failed" && j.Mode == "audio" {
+		s.extractAudioFallback(j)
+	}
 	s.kick()
 }
 func (s *Service) persistLocked(j *job) error {

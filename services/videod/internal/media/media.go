@@ -19,11 +19,11 @@ import (
 )
 
 type Config struct {
-	YtDlpPath, MpvPath, DownloadDir, IPCDir string
-	Concurrency                             int
-	Headless                                bool
-	Notifier                                NotificationSender
-	YouTubeBrowser                          string
+	YtDlpPath, MpvPath, FFmpegPath, DownloadDir, IPCDir string
+	Concurrency                                         int
+	Headless                                            bool
+	Notifier                                            NotificationSender
+	YouTubeBrowser                                      string
 }
 
 type notificationBatch struct {
@@ -95,6 +95,9 @@ func New(db *sql.DB, cfg Config) (*Service, error) {
 	}
 	if cfg.MpvPath == "" {
 		cfg.MpvPath = "mpv"
+	}
+	if cfg.FFmpegPath == "" {
+		cfg.FFmpegPath = "ffmpeg"
 	}
 	if cfg.DownloadDir == "" {
 		cfg.DownloadDir = "downloads"
