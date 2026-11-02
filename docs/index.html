@@ -59,15 +59,9 @@ function render(){
  const grid=document.getElementById('grid');
  if(!filtered.length){grid.innerHTML='<div class="empty">動画がありません</div>';return;}
  grid.innerHTML=filtered.map(v=>{
-   const thumb=v.thumbnail_file?`data/${v.thumbnail_file}`:(v.thumbnail_url||'');
-   const fallback=v.thumbnail_file&&v.thumbnail_url?` data-fallback="${escape(v.thumbnail_url)}"`:'';
-   return `<article class="card"><img class="thumb" loading="lazy" src="${escape(thumb)}"${fallback} alt=""><div class="body"><span class="badge">${escape(v.source)}</span><h2 class="title">${escape(v.title)}</h2><div class="meta"><span>${escape(v.uploader||v.channel||'')}</span><span>${formatDuration(v.duration_seconds)}</span></div></div></article>`;
+   const thumb=v.thumbnail_file?`data/${v.thumbnail_file}`:'';
+   return `<article class="card"><img class="thumb" loading="lazy" src="${escape(thumb)}" alt=""><div class="body"><span class="badge">${escape(v.source)}</span><h2 class="title">${escape(v.title)}</h2><div class="meta"><span>${escape(v.uploader||v.channel||'')}</span><span>${formatDuration(v.duration_seconds)}</span></div></div></article>`;
  }).join('');
- grid.querySelectorAll('img[data-fallback]').forEach(img=>img.addEventListener('error',()=>{
-   const fallback=img.dataset.fallback;
-   img.removeAttribute('data-fallback');
-   img.src=fallback;
- }));
 }
 document.querySelectorAll('.filter').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('.filter').forEach(x=>x.classList.remove('active'));b.classList.add('active');render();}));
 document.getElementById('search').addEventListener('input',render);

@@ -2,15 +2,62 @@
 """Refresh the GitHub Pages catalog from the local OfflineVideos service."""
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 import tempfile
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parent
 CATALOG = ROOT / "data" / "catalog.json"
 API_URL = os.environ.get("OFFLINEVIDEOS_CATALOG_API", "http://127.0.0.1:8732/api/catalog")
+
+
+def cache_thumbnail(item: dict) -> None:
+    name = item.get("thumbnail_file")
+    if name:
+        path = (CATALOG.parent / name).resolve()
+        if CATALOG.parent.resolve() not in path.parents:
+            raise ValueError("thumbnail path escapes the static data directory")
+        if path.is_file() and path.stat().st_size:
+            return
+    else:
+        url = item.get("thumbnail_url")
+        if not url:
+            raise ValueError(f"catalog item {item['source']}/{item['id']} has no thumbnail URL")
+        name = f"thumbnails/{hashlib.sha256(url.encode()).hexdigest()}.jpg"
+        item["thumbnail_file"] = name
+        path = CATALOG.parent / name
+        if path.is_file() and path.stat().st_size:
+            return
+
+    url = item.get("thumbnail_url")
+    if not url:
+        raise ValueError(f"thumbnail file is missing and no URL is available for {item['id']}")
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/132.0 Safari/537.36",
+            "Referer": "https://www.bilibili.com/",
+        },
+    )
+    with urlopen(request, timeout=30) as response:
+        image = response.read(10 * 1024 * 1024 + 1)
+        content_type = response.headers.get("Content-Type", "").lower()
+    if len(image) > 10 * 1024 * 1024 or not content_type.startswith("image/"):
+        raise ValueError(f"thumbnail response is not a valid image for {item['id']}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".thumbnail-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as output:
+            output.write(image)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def load_catalog(raw: bytes) -> dict:
@@ -28,12 +75,14 @@ def load_catalog(raw: bytes) -> dict:
         "thumbnail_url",
     )
     items = []
-    for item in catalog["items"]:
-        if not isinstance(item, dict) or not item.get("id") or not item.get("source"):
+    for original in catalog["items"]:
+        if not isinstance(original, dict) or not original.get("id") or not original.get("source"):
             raise ValueError("catalog contains an item without source or id")
-        if not item.get("thumbnail_file") and not item.get("thumbnail_url"):
-            raise ValueError(f"catalog item {item['source']}/{item['id']} has no thumbnail")
-        items.append({key: item[key] for key in fields if key in item})
+        if not original.get("thumbnail_file") and not original.get("thumbnail_url"):
+            raise ValueError(f"catalog item {original['source']}/{original['id']} has no thumbnail")
+        item = {key: original[key] for key in fields if key in original}
+        cache_thumbnail(item)
+        items.append(item)
     return {"version": catalog.get("version", 1), "updated_at": catalog.get("updated_at", ""), "items": items}
 
 
