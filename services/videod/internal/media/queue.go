@@ -302,9 +302,8 @@ func (s *Service) run(ctx context.Context, j *job) {
 func (s *Service) queueCompletionNotice(account, title string) {
 	s.mu.Lock()
 	s.notifyPending[account] = append(s.notifyPending[account], title)
-	pending := len(s.notifyPending[account])
 	s.mu.Unlock()
-	if pending != 1 {
+	if s.cfg.Notifier == nil {
 		return
 	}
 	go func() {
