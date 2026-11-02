@@ -60,13 +60,14 @@ def cache_thumbnail(item: dict) -> None:
             os.unlink(temporary)
 
 
-def load_catalog(raw: bytes) -> dict:
+def load_catalog(raw: bytes, require_source_url: bool = True) -> dict:
     catalog = json.loads(raw)
     if not isinstance(catalog, dict) or not isinstance(catalog.get("items"), list):
         raise ValueError("catalog response must contain an items array")
     fields = (
         "id",
         "source",
+        "source_url",
         "title",
         "uploader",
         "channel",
@@ -80,6 +81,8 @@ def load_catalog(raw: bytes) -> dict:
             raise ValueError("catalog contains an item without source or id")
         if not original.get("thumbnail_file") and not original.get("thumbnail_url"):
             raise ValueError(f"catalog item {original['source']}/{original['id']} has no thumbnail")
+        if require_source_url and not original.get("source_url"):
+            raise ValueError(f"catalog item {original['source']}/{original['id']} has no source URL")
         item = {key: original[key] for key in fields if key in original}
         cache_thumbnail(item)
         items.append(item)
@@ -96,7 +99,7 @@ def main() -> int:
 
     previous = None
     try:
-        previous = load_catalog(CATALOG.read_bytes())
+        previous = load_catalog(CATALOG.read_bytes(), require_source_url=False)
     except FileNotFoundError:
         pass
 
