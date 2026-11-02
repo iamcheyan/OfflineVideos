@@ -22,6 +22,8 @@ type Config struct {
 	YtDlpPath, MpvPath, DownloadDir, IPCDir string
 	Concurrency                             int
 	Headless                                bool
+	Notifier                                NotificationSender
+	YouTubeBrowser                          string
 }
 
 type Service struct {
@@ -33,6 +35,7 @@ type Service struct {
 	players        map[string]*player
 	paused, closed bool
 	nextRequestID  uint64
+	notifyPending  map[string]int
 }
 
 type job struct {
@@ -104,7 +107,7 @@ func New(db *sql.DB, cfg Config) (*Service, error) {
 	if err := os.MkdirAll(cfg.IPCDir, 0700); err != nil {
 		return nil, err
 	}
-	s := &Service{db: db, cfg: cfg, jobs: make(map[int64]*job), players: make(map[string]*player)}
+	s := &Service{db: db, cfg: cfg, jobs: make(map[int64]*job), players: make(map[string]*player), notifyPending: make(map[string]int)}
 	if err := s.restoreJobs(context.Background()); err != nil {
 		return nil, err
 	}

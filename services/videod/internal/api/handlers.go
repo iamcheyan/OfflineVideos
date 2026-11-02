@@ -36,6 +36,8 @@ type Handler struct {
 	// whether a file was actually removed. Wired by main so the HTTP layer does
 	// not depend on the media package.
 	DeleteDownload func(account, videoID string) (removed bool, err error)
+	// SyncDeleteDownload removes local cached data after a successful source sync.
+	SyncDeleteDownload func(ctx context.Context, account, videoID string) (removed bool, err error)
 }
 
 func New(db *sql.DB) *Handler { return &Handler{DB: db, Accounts: store.AccountStore{DB: db}} }
@@ -422,6 +424,19 @@ func (h *Handler) markWatched(w http.ResponseWriter, r *http.Request) {
 			fileRemoved = removed
 		}
 	}
+	if _, err := h.DB.ExecContext(r.Context(), `DELETE FROM remote_missing WHERE account_id=? AND video_id=?`, account, id); err != nil {
+		fileError = errors.Join(errors.New(fileError), err).Error()
+	}
+	if _, err := h.DB.ExecContext(r.Context(), `DELETE FROM source_mirror WHERE account_id=? AND video_id=?`, account, id); err != nil {
+		fileError = errors.Join(errors.New(fileError), err).Error()
+	}
+	if _, err := h.DB.ExecContext(r.Context(), `DELETE FROM videos WHERE account_id=? AND id=?
+		AND NOT EXISTS (SELECT 1 FROM playlist_videos WHERE video_id=? AND playlist_id<>?)
+		AND NOT EXISTS (SELECT 1 FROM favorites WHERE account_id=? AND video_id=?)
+		AND NOT EXISTS (SELECT 1 FROM history WHERE account_id=? AND video_id=?)`,
+		account, id, id, watchLaterPlaylistID(account), account, id, account, id); err != nil {
+		fileError = errors.Join(errors.New(fileError), err).Error()
+	}
 
 	result := map[string]any{
 		"status": "ok", "video_id": id, "account_id": account,
@@ -603,6 +618,20 @@ func (h *Handler) sync(w http.ResponseWriter, r *http.Request) {
 			if videos, err := provider.SyncWatchLater(ctx, account); err != nil {
 				errs = append(errs, "watch_later: "+err.Error())
 			} else {
+				// An empty YouTube Watch Later response is ambiguous: yt-dlp
+				// can return zero entries when YouTube rejects the private list.
+				// Never erase an existing local list unless the user explicitly
+				// emptied it in the source; an empty read cannot prove that.
+				if account == "youtube" && len(videos) == 0 {
+					var localCount int
+					if err := h.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM watch_later WHERE account_id=?`, account).Scan(&localCount); err != nil {
+						errs = append(errs, "watch_later local count: "+err.Error())
+					} else if localCount > 0 {
+						errs = append(errs, "watch_later: upstream returned an empty list; preserved local entries")
+						result["watch_later_preserved"] = localCount
+						goto watchLaterDone
+					}
+				}
 				// A successful provider read is authoritative for list
 				// membership. It runs before the rows are replaced, because
 				// after the rewrite there is nothing left to compare against.
@@ -611,6 +640,20 @@ func (h *Handler) sync(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					errs = append(errs, "watch_later diff: "+err.Error())
 					removed = nil
+				}
+				mirrorRemoved, mirrorErr := h.sourceMirrorChanges(ctx, account, videos)
+				if mirrorErr != nil {
+					errs = append(errs, "watch_later mirror diff: "+mirrorErr.Error())
+				} else if len(mirrorRemoved) > 0 {
+					if h.SyncDeleteDownload == nil {
+						errs = append(errs, "watch_later mirror cleanup is not configured")
+					} else {
+						for _, id := range mirrorRemoved {
+							if _, deleteErr := h.SyncDeleteDownload(ctx, account, id); deleteErr != nil {
+								errs = append(errs, "remove cached source video "+id+": "+deleteErr.Error())
+							}
+						}
+					}
 				}
 				marked, rerr := h.reconcileRemoteMissing(ctx, account, videos)
 				if rerr != nil {
@@ -622,9 +665,17 @@ func (h *Handler) sync(w http.ResponseWriter, r *http.Request) {
 				} else if _, err := h.upsertPlaylistVideos(ctx, account, watchLaterPlaylistID(account), watchLaterPlaylistTitle(account), videos); err != nil {
 					errs = append(errs, "watch_later playlist: "+err.Error())
 				} else {
+					if mirrorErr == nil {
+						if err := h.commitSourceMirror(ctx, account, videos); err != nil {
+							errs = append(errs, "watch_later mirror commit: "+err.Error())
+						}
+					}
 					synced += len(videos)
 					if len(removed) > 0 {
 						result["watch_later_removed"] = removed
+					}
+					if len(mirrorRemoved) > 0 {
+						result["cache_removed"] = mirrorRemoved
 					}
 					if len(marked) > 0 {
 						result["now_missing_remotely"] = marked
@@ -646,6 +697,7 @@ func (h *Handler) sync(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	watchLaterDone:
 		result["provider_sync"] = "done"
 		result["synced_items"] = synced
 	}

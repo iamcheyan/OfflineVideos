@@ -24,6 +24,7 @@ type YouTubeConfig struct {
 	Binary     string
 	MaxResults int
 	CookiePath string
+	Browser    string
 }
 
 type YouTubeProvider struct{ config YouTubeConfig }
@@ -48,6 +49,9 @@ func (*YouTubeProvider) Logout(ctx context.Context, id string) error { return ni
 
 // authenticated reports whether a cookie jar is configured and readable.
 func (p *YouTubeProvider) authenticated() bool {
+	if p.config.Browser != "" {
+		return true
+	}
 	if p.config.CookiePath == "" {
 		return false
 	}
@@ -57,6 +61,9 @@ func (p *YouTubeProvider) authenticated() bool {
 
 // authArgs returns the cookie flags appended to every yt-dlp call.
 func (p *YouTubeProvider) authArgs() []string {
+	if p.config.Browser != "" {
+		return []string{"--cookies-from-browser", p.config.Browser}
+	}
 	if !p.authenticated() {
 		return nil
 	}
@@ -69,6 +76,9 @@ func (p *YouTubeProvider) run(ctx context.Context, timeout time.Duration, args .
 	defer cancel()
 
 	cmd := exec.CommandContext(cctx, p.config.Binary, args...)
+	if p.config.Browser != "" {
+		cmd.Args = append(cmd.Args[:1], append([]string{"--js-runtimes", "node"}, cmd.Args[1:]...)...)
+	}
 	var out, errb strings.Builder
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
@@ -203,11 +213,8 @@ func (p *YouTubeProvider) SyncWatchLater(ctx context.Context, id string) ([]doma
 			continue
 		}
 		title := strings.TrimSpace(f[1])
-		if title == "" || title == "NA" ||
-			title == "[Private video]" || title == "[Deleted video]" ||
-			title == "[Unavailable video]" || strings.HasPrefix(title, "[Private video") ||
-			strings.HasPrefix(title, "[Deleted video") {
-			continue
+		if title == "" || title == "NA" {
+			title = f[0]
 		}
 		dur := 0
 		if len(f) > 2 {
@@ -220,13 +227,9 @@ func (p *YouTubeProvider) SyncWatchLater(ctx context.Context, id string) ([]doma
 			chID = f[3]
 		}
 		videos = append(videos, domain.Video{
-			ID:        f[0],
-			AccountID: id,
-			ChannelID: chID,
-			Title:     f[1],
+			ID: f[0], AccountID: id, ChannelID: chID, Title: title,
 			URL:       "https://www.youtube.com/watch?v=" + f[0],
-			Thumbnail: youtubeThumbnail(f[0]),
-			Duration:  dur,
+			Thumbnail: youtubeThumbnail(f[0]), Duration: dur,
 		})
 	}
 	return videos, nil

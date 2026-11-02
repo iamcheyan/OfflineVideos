@@ -102,7 +102,8 @@ func (s *Service) DeleteDownload(ctx context.Context, account, videoID string) (
 		return false, err
 	}
 	if strings.TrimSpace(path) == "" {
-		return false, nil
+		_, err := s.db.ExecContext(ctx, `DELETE FROM downloads WHERE account_id=? AND video_id=?`, account, videoID)
+		return false, err
 	}
 	root, err := filepath.Abs(s.cfg.DownloadDir)
 	if err != nil {

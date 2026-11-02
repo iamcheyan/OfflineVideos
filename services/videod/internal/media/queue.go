@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -128,6 +129,10 @@ func (s *Service) hasAudioOnlyWithoutCookies(j *job) bool {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, s.cfg.YtDlpPath,
 		"--no-warnings", "--skip-download", "--list-formats", j.URL)
+	if j.AccountID == "youtube" && s.cfg.YouTubeBrowser != "" {
+		cmd.Args = append(cmd.Args[:1], append([]string{"--js-runtimes", "node"}, cmd.Args[1:]...)...)
+		cmd.Args = append(cmd.Args[:len(cmd.Args)-1], "--cookies-from-browser", s.cfg.YouTubeBrowser, "--js-runtimes", "node", cmd.Args[len(cmd.Args)-1])
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		return false
@@ -163,13 +168,18 @@ func (s *Service) run(ctx context.Context, j *job) {
 	format := downloadFormat(j)
 	template := filepath.Join(s.cfg.DownloadDir, "%(id)s.%(ext)s")
 	args := []string{"--newline", "--no-warnings", "-f", format, "-o", template, "--write-thumbnail", "--convert-thumbnails", "jpg", "--print-json", "--print", "after_move:filepath", "--continue"}
+	if j.AccountID == "youtube" && s.cfg.YouTubeBrowser != "" {
+		args = append(args, "--js-runtimes", "node")
+	}
 	dataDir := filepath.Dir(s.cfg.DownloadDir)
 	cookieFile := "cookies.txt"
 	if j.AccountID == "bilibili" {
 		cookieFile = "bilibili-cookies.txt"
 	}
 	cookiePath := filepath.Join(dataDir, cookieFile)
-	if _, err := os.Stat(cookiePath); err == nil && !j.anonymous {
+	if j.AccountID == "youtube" && s.cfg.YouTubeBrowser != "" {
+		args = append(args, "--cookies-from-browser", s.cfg.YouTubeBrowser, "--js-runtimes", "node")
+	} else if _, err := os.Stat(cookiePath); err == nil && !j.anonymous {
 		args = append(args, "--cookies", cookiePath)
 	}
 	args = append(args, j.URL)
@@ -274,11 +284,39 @@ func (s *Service) run(ctx context.Context, j *job) {
 		return
 	}
 	j.Progress = 100
+	j.OutputPath = outputPath
 	s.mu.Lock()
 	j.State = "completed"
 	_ = s.persistLocked(j)
 	s.mu.Unlock()
+	if s.cfg.Notifier != nil {
+		s.queueCompletionNotice(j.AccountID)
+	}
 	s.kick()
+}
+
+func (s *Service) queueCompletionNotice(account string) {
+	s.mu.Lock()
+	s.notifyPending[account]++
+	pending := s.notifyPending[account]
+	s.mu.Unlock()
+	if pending != 1 {
+		return
+	}
+	go func() {
+		time.Sleep(10 * time.Second)
+		s.mu.Lock()
+		count := s.notifyPending[account]
+		delete(s.notifyPending, account)
+		s.mu.Unlock()
+		if count == 0 {
+			return
+		}
+		message := fmt.Sprintf("✅ OfflineVideos 缓存摘要：本批次成功下载 %d 个视频（%s）。NAS：%s", count, account, s.cfg.DownloadDir)
+		if err := s.cfg.Notifier.Send(context.Background(), message); err != nil {
+			log.Printf("download summary notification failed account=%s: %v", account, err)
+		}
+	}()
 }
 func (s *Service) finish(j *job, state string, err error) {
 	s.mu.Lock()

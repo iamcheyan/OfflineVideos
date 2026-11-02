@@ -72,12 +72,12 @@ func main() {
 			log.Fatal("OFFLINEVIDEOS_CONCURRENCY must be 1-8")
 		}
 	}
-	ms, e := media.New(db, media.Config{YtDlpPath: ytDlp, MpvPath: env("OFFLINEVIDEOS_MPV", "mpv"), DownloadDir: downloads, IPCDir: filepath.Join(data, "ipc"), Concurrency: workers, Headless: true})
+	ms, e := media.New(db, media.Config{YtDlpPath: ytDlp, MpvPath: env("OFFLINEVIDEOS_MPV", "mpv"), DownloadDir: downloads, IPCDir: filepath.Join(data, "ipc"), Concurrency: workers, Headless: true, YouTubeBrowser: env("OFFLINEVIDEOS_YOUTUBE_BROWSER", "firefox:default-esr"), Notifier: media.HermesTelegramSender{Binary: env("OFFLINEVIDEOS_HERMES", "hermes"), Target: env("OFFLINEVIDEOS_NOTIFY_TARGET", "telegram:7054611053:47492")}})
 	if e != nil {
 		log.Fatal(e)
 	}
 	defer ms.Close()
-	yt := provider.NewYouTubeProvider(provider.YouTubeConfig{Binary: ytDlp, CookiePath: filepath.Join(data, "cookies.txt")})
+	yt := provider.NewYouTubeProvider(provider.YouTubeConfig{Binary: ytDlp, CookiePath: filepath.Join(data, "cookies.txt"), Browser: env("OFFLINEVIDEOS_YOUTUBE_BROWSER", "firefox:default-esr")})
 	bi := provider.NewBilibiliProvider(provider.BilibiliConfig{Binary: ytDlp, CookiePath: filepath.Join(data, "bilibili-cookies.txt")})
 	h := api.New(db)
 	h.DataDir = data
@@ -86,6 +86,9 @@ func main() {
 	h.EnqueueDownload = ms.Enqueue
 	h.DeleteDownload = func(account, videoID string) (bool, error) {
 		return ms.DeleteDownload(context.Background(), account, videoID)
+	}
+	h.SyncDeleteDownload = func(ctx context.Context, account, videoID string) (bool, error) {
+		return ms.DeleteDownload(ctx, account, videoID)
 	}
 	h.SetHealth(func(ctx context.Context) (map[string]any, error) {
 		return map[string]any{"mock": false, "database": "sqlite", "download_dir": downloads}, nil

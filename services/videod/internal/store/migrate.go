@@ -10,7 +10,7 @@ import (
 
 // SchemaVersion is the migration number this build expects. Migration files are
 // applied in order; each is recorded in schema_migrations so restarts are no-ops.
-const SchemaVersion = 4
+const SchemaVersion = 5
 
 type migration struct {
 	version int
@@ -49,6 +49,7 @@ ALTER TABLE settings ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';`},
 	// row is metadata, not a delete instruction: the file stays until the user
 	// asks for it to go.
 	{4, "remote missing", `CREATE TABLE IF NOT EXISTS remote_missing(account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,video_id TEXT NOT NULL,since TEXT NOT NULL,PRIMARY KEY(account_id,video_id));`},
+	{5, "source mirror cleanup", `CREATE TABLE IF NOT EXISTS source_mirror(account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,video_id TEXT NOT NULL,seen_at TEXT NOT NULL,PRIMARY KEY(account_id,video_id));`},
 }
 
 // Migrate applies every pending migration in a transaction and records its version.

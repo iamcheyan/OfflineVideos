@@ -214,6 +214,88 @@ func (h *Handler) upsertPlaylistVideos(ctx context.Context, account, playlistID,
 	return n, tx.Commit()
 }
 
+// sourceMirrorChanges compares a successful upstream response to its prior snapshot.
+// Before the first snapshot, only the local Watch Later list is treated as baseline.
+func (h *Handler) sourceMirrorChanges(ctx context.Context, account string, current []domain.Video) ([]string, error) {
+	rows, err := h.DB.QueryContext(ctx, `SELECT video_id FROM source_mirror WHERE account_id=?`, account)
+	if err != nil {
+		return nil, err
+	}
+	var previous []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		previous = append(previous, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if len(previous) == 0 {
+		rows, err = h.DB.QueryContext(ctx, `SELECT video_id FROM watch_later WHERE account_id=?`, account)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		keep := map[string]bool{}
+		for _, v := range current {
+			keep[v.ID] = true
+		}
+		var removed []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return nil, err
+			}
+			if !keep[id] {
+				removed = append(removed, id)
+			}
+		}
+		return removed, rows.Err()
+	}
+	keep := map[string]bool{}
+	for _, v := range current {
+		if v.ID != "" {
+			keep[v.ID] = true
+		}
+	}
+	var removed []string
+	for _, id := range previous {
+		if id != "" && !keep[id] {
+			removed = append(removed, id)
+		}
+	}
+	return removed, nil
+}
+
+func (h *Handler) commitSourceMirror(ctx context.Context, account string, current []domain.Video) error {
+	if len(current) == 0 {
+		return nil
+	}
+	tx, err := h.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM source_mirror WHERE account_id=?`, account); err != nil {
+		return err
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, v := range current {
+		if v.ID == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO source_mirror(account_id,video_id,seen_at) VALUES(?,?,?)`, account, v.ID, stamp); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // changedWatchLater reports which videos were in the local watch-later list but
 // are absent from the list the provider just returned.
 //
