@@ -167,6 +167,9 @@ func (s *Service) run(ctx context.Context, j *job) {
 	}
 	format := downloadFormat(j)
 	template := filepath.Join(s.cfg.DownloadDir, "%(id)s.%(ext)s")
+	if j.Mode == "audio" {
+		template = filepath.Join(s.cfg.DownloadDir, "%(id)s.%(ext)s")
+	}
 	args := []string{"--newline", "--no-warnings", "-f", format, "-o", template, "--write-thumbnail", "--convert-thumbnails", "jpg", "--print-json", "--print", "after_move:filepath", "--continue"}
 	if j.AccountID == "youtube" && s.cfg.YouTubeBrowser != "" {
 		args = append(args, "--js-runtimes", "node")

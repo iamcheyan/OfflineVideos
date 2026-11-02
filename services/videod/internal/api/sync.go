@@ -459,6 +459,9 @@ func (h *Handler) autoEnqueue(ctx context.Context, account string, videos []doma
 			errs = append(errs, "auto download "+v.ID+": "+err.Error())
 			continue
 		}
+		if _, err := h.EnqueueDownload(account, v.ID, v.URL, "audio", "720p", "192", 0); err != nil {
+			errs = append(errs, "auto audio "+v.ID+": "+err.Error())
+		}
 		queued++
 	}
 	return queued, skipped, errs
