@@ -39,7 +39,7 @@ func (s *Service) library(w http.ResponseWriter, r *http.Request) {
 	} else if sortBy == "duration" {
 		order = "COALESCE(v.duration,0) DESC"
 	}
-	base := `SELECT COALESCE(v.id,d.video_id),d.account_id,COALESCE(v.channel_id,''),COALESCE(v.title,d.video_id),COALESCE(v.url,d.url),COALESCE(v.thumbnail,''),COALESCE(v.duration,0),COALESCE(v.published_at,''),COALESCE(v.description,''),d.mode,d.quality,d.output_path,COALESCE((SELECT a.output_path FROM downloads a WHERE a.account_id=d.account_id AND a.video_id=d.video_id AND a.mode='audio' AND a.state='completed' AND a.output_path<>'' ORDER BY a.created_at DESC,a.id DESC LIMIT 1),''),COALESCE(m.since,'') FROM downloads d LEFT JOIN videos v ON v.id=d.video_id AND v.account_id=d.account_id LEFT JOIN remote_missing m ON m.video_id=d.video_id AND m.account_id=d.account_id WHERE d.state='completed' AND d.output_path<>'' AND d.mode='video'`
+	base := `SELECT COALESCE(v.id,d.video_id),d.account_id,COALESCE(v.channel_id,''),COALESCE(v.title,d.video_id),COALESCE(v.url,d.url),COALESCE(v.thumbnail,''),COALESCE(v.duration,0),COALESCE(v.published_at,''),COALESCE(v.description,''),d.mode,d.quality,d.output_path,COALESCE(c.title,''),COALESCE((SELECT a.output_path FROM downloads a WHERE a.account_id=d.account_id AND a.video_id=d.video_id AND a.mode='audio' AND a.state='completed' AND a.output_path<>'' ORDER BY a.created_at DESC,a.id DESC LIMIT 1),''),COALESCE(m.since,'') FROM downloads d LEFT JOIN videos v ON v.id=d.video_id AND v.account_id=d.account_id LEFT JOIN channels c ON c.id=v.channel_id AND c.account_id=v.account_id LEFT JOIN remote_missing m ON m.video_id=d.video_id AND m.account_id=d.account_id WHERE d.state='completed' AND d.output_path<>'' AND d.mode='video'`
 	args := []any{}
 	if accountParam != "" {
 		base += ` AND d.account_id=?`
@@ -61,16 +61,16 @@ func (s *Service) library(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	out := []map[string]any{}
 	for rows.Next() {
-		var id, aid, cid, title, url, thumb, pub, desc, mode, quality, path, audioPath, missingSince string
+		var id, aid, cid, title, url, thumb, pub, desc, mode, quality, path, uploader, audioPath, missingSince string
 		var duration int
-		if err := rows.Scan(&id, &aid, &cid, &title, &url, &thumb, &duration, &pub, &desc, &mode, &quality, &path, &audioPath, &missingSince); err != nil {
+		if err := rows.Scan(&id, &aid, &cid, &title, &url, &thumb, &duration, &pub, &desc, &mode, &quality, &path, &uploader, &audioPath, &missingSince); err != nil {
 			apiError(w, 500, "database_error", "unable to read offline library")
 			return
 		}
 		// remote_missing_since is only set when the source's list no longer
 		// contains the video, which is how a watched item is recognised. The
 		// app labels it and offers a delete; the file is never removed here.
-		out = append(out, map[string]any{"id": id, "account_id": aid, "channel_id": cid, "title": title, "url": url, "thumbnail": thumb, "duration": duration, "published_at": pub, "description": desc, "mode": mode, "quality": quality, "path": path, "audio_path": audioPath, "remote_missing_since": missingSince})
+		out = append(out, map[string]any{"id": id, "account_id": aid, "channel_id": cid, "title": title, "url": url, "thumbnail": thumb, "duration": duration, "published_at": pub, "description": desc, "uploader": uploader, "mode": mode, "quality": quality, "path": path, "audio_path": audioPath, "remote_missing_since": missingSince})
 	}
 	if err := rows.Err(); err != nil {
 		apiError(w, 500, "database_error", "unable to read offline library")

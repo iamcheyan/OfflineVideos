@@ -2,6 +2,7 @@ package media
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +31,12 @@ func TestAudioFallbackExtractsMP3RegardlessOfJobCompletionOrder(t *testing.T) {
 			}
 			defer db.Close()
 			if err := store.EnsureAccount(context.Background(), db, "youtube"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO channels(id,account_id,title,url) VALUES('channel','youtube','京都の音楽チャンネル','https://example.test/channel')`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO videos(id,account_id,channel_id,title,url,published_at) VALUES('fixture','youtube','channel','桜の季節｜ライブ映像','https://example.test/fixture','')`); err != nil {
 				t.Fatal(err)
 			}
 			svc, err := New(db, Config{DownloadDir: root, FFmpegPath: ffmpeg})
@@ -76,6 +83,34 @@ func TestAudioFallbackExtractsMP3RegardlessOfJobCompletionOrder(t *testing.T) {
 			info, err := os.Stat(outputPath)
 			if err != nil || info.Size() == 0 {
 				t.Fatalf("extracted MP3 missing or empty: %v", err)
+			}
+			probe, err := exec.Command("ffprobe", "-v", "error", "-show_entries", "format_tags=title,artist,album_artist", "-of", "json", outputPath).Output()
+			if err != nil {
+				t.Fatalf("read extracted MP3 tags: %v", err)
+			}
+			var tags struct {
+				Format struct {
+					Tags map[string]string `json:"tags"`
+				} `json:"format"`
+			}
+			if err := json.Unmarshal(probe, &tags); err != nil {
+				t.Fatal(err)
+			}
+			if tags.Format.Tags["title"] != "桜の季節｜ライブ映像" || tags.Format.Tags["artist"] != "京都の音楽チャンネル" {
+				t.Fatalf("unexpected MP3 tags: %#v", tags.Format.Tags)
+			}
+			if err := svc.embedMP3Tags(outputPath, "タグ付け後の曲名", "タグ付け後のチャンネル"); err != nil {
+				t.Fatal(err)
+			}
+			probe, err = exec.Command("ffprobe", "-v", "error", "-show_entries", "format_tags=title,artist,album_artist", "-of", "json", outputPath).Output()
+			if err != nil {
+				t.Fatalf("read remuxed MP3 tags: %v", err)
+			}
+			if err := json.Unmarshal(probe, &tags); err != nil {
+				t.Fatal(err)
+			}
+			if tags.Format.Tags["title"] != "タグ付け後の曲名" || tags.Format.Tags["artist"] != "タグ付け後のチャンネル" {
+				t.Fatalf("unexpected remuxed MP3 tags: %#v", tags.Format.Tags)
 			}
 		})
 	}

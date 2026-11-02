@@ -292,6 +292,12 @@ func (s *Service) run(ctx context.Context, j *job) {
 			s.finish(j, "failed", fmt.Errorf("write media catalog: %w", err))
 			return
 		}
+	} else {
+		title, artist := s.audioTags(j, metadata)
+		if err := s.embedMP3Tags(outputPath, title, artist); err != nil {
+			s.finish(j, "failed", fmt.Errorf("write MP3 tags: %w", err))
+			return
+		}
 	}
 	j.Progress = 100
 	j.OutputPath = outputPath
@@ -395,7 +401,8 @@ func (s *Service) extractAudioFallback(completedJob *job) {
 	_ = s.persistLocked(audioJob)
 	s.mu.Unlock()
 
-	if err := s.convertAudioToMP3(videoPath, audioJob.OutputPath, audioJob.AudioBitrate); err != nil {
+	title, artist := s.audioTags(audioJob, nil)
+	if err := s.convertAudioToMP3(videoPath, audioJob.OutputPath, audioJob.AudioBitrate, title, artist); err != nil {
 		s.mu.Lock()
 		audioJob.State = "failed"
 		audioJob.Error = "audio source failed; local extraction failed: " + err.Error()
@@ -411,7 +418,50 @@ func (s *Service) extractAudioFallback(completedJob *job) {
 	s.mu.Unlock()
 }
 
-func (s *Service) convertAudioToMP3(videoPath, outputPath, bitrate string) error {
+func (s *Service) audioTags(j *job, metadata map[string]any) (string, string) {
+	title := nonEmpty(stringValue(metadata["title"]), stringValue(metadata["track"]))
+	artist := nonEmpty(stringValue(metadata["channel"]), stringValue(metadata["uploader"]))
+	if artist == "" {
+		artist = nonEmpty(stringValue(metadata["artist"]), stringValue(metadata["creator"]))
+	}
+	var storedTitle, channel string
+	if j != nil && j.VideoID != "" {
+		_ = s.db.QueryRow(`SELECT COALESCE(v.title,''),COALESCE(c.title,'') FROM videos v LEFT JOIN channels c ON c.id=v.channel_id AND c.account_id=v.account_id WHERE v.account_id=? AND v.id=?`, j.AccountID, j.VideoID).Scan(&storedTitle, &channel)
+	}
+	title = nonEmpty(title, storedTitle)
+	artist = nonEmpty(artist, channel)
+	if j != nil {
+		title = nonEmpty(title, j.VideoID)
+		artist = nonEmpty(artist, j.AccountID)
+	}
+	return title, artist
+}
+
+func (s *Service) embedMP3Tags(path, title, artist string) error {
+	if path == "" {
+		return errors.New("MP3 path is empty")
+	}
+	tmpPath := path + ".tagging.mp3"
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, s.cfg.FFmpegPath, "-nostdin", "-y", "-i", path, "-map", "0:a:0", "-c:a", "copy", "-id3v2_version", "3", "-metadata", "title="+title, "-metadata", "artist="+artist, "-metadata", "album_artist="+artist, "-metadata", "album="+artist, tmpPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = err.Error()
+		}
+		return fmt.Errorf("ffmpeg MP3 tagging: %s", message)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("publish tagged MP3: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) convertAudioToMP3(videoPath, outputPath, bitrate, title, artist string) error {
 	if outputPath == "" {
 		outputPath = filepath.Join(s.cfg.DownloadDir, filepath.Base(strings.TrimSuffix(videoPath, filepath.Ext(videoPath)))+".audio.mp3")
 	}
@@ -421,7 +471,7 @@ func (s *Service) convertAudioToMP3(videoPath, outputPath, bitrate string) error
 	tmpPath := outputPath + ".extracting.mp3"
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, s.cfg.FFmpegPath, "-nostdin", "-y", "-i", videoPath, "-vn", "-map", "0:a:0", "-codec:a", "libmp3lame", "-b:a", bitrate+"k", tmpPath)
+	cmd := exec.CommandContext(ctx, s.cfg.FFmpegPath, "-nostdin", "-y", "-i", videoPath, "-vn", "-map", "0:a:0", "-codec:a", "libmp3lame", "-b:a", bitrate+"k", "-id3v2_version", "3", "-metadata", "title="+title, "-metadata", "artist="+artist, "-metadata", "album_artist="+artist, "-metadata", "album="+artist, tmpPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		_ = os.Remove(tmpPath)

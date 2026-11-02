@@ -37,7 +37,7 @@ Set these variables in a private systemd EnvironmentFile:
 - `OFFLINEVIDEOS_AUTO_DOWNLOAD` — auto-queue newly synced items; default `on`
 - `OFFLINEVIDEOS_SYNC_INTERVAL_MIN` — Watch Later sync interval; default 60, `0` disables it
 
-The service syncs both Watch Later lists at startup and on each interval. When auto-download is enabled, each item is kept as a video download plus a companion MP3 at the configured audio bitrate. Existing video-only cache entries are backfilled with audio on the next successful list sync; completed or in-flight audio jobs are not duplicated. The source audio stream and video download run as separate jobs; if the source audio job fails, the service extracts an MP3 from the completed local video with ffmpeg.
+The service syncs both Watch Later lists at startup and on each interval. When auto-download is enabled, each item is kept as a video download plus a companion MP3 at the configured audio bitrate. Existing video-only cache entries are backfilled with audio on the next successful list sync; completed or in-flight audio jobs are not duplicated. The source audio stream and video download run as separate jobs; if the source audio job fails, the service extracts an MP3 from the completed local video with ffmpeg. MP3 files carry ID3 title and artist/album-artist tags using the video title and channel/uploader name, so music players show readable track details even though the stored filename uses the source ID.
 
 ## Cookie import
 
