@@ -168,9 +168,14 @@ func (s *Service) run(ctx context.Context, j *job) {
 	format := downloadFormat(j)
 	template := filepath.Join(s.cfg.DownloadDir, "%(id)s.%(ext)s")
 	if j.Mode == "audio" {
-		template = filepath.Join(s.cfg.DownloadDir, "%(id)s.%(ext)s")
+		template = filepath.Join(s.cfg.DownloadDir, "%(id)s.audio.%(ext)s")
 	}
-	args := []string{"--newline", "--no-warnings", "-f", format, "-o", template, "--write-thumbnail", "--convert-thumbnails", "jpg", "--print-json", "--print", "after_move:filepath", "--continue"}
+	args := []string{"--newline", "--no-warnings", "-f", format, "-o", template, "--print-json", "--print", "after_move:filepath", "--continue"}
+	if j.Mode == "audio" {
+		args = append(args, "--extract-audio", "--audio-format", "mp3", "--audio-quality", j.AudioBitrate+"K")
+	} else {
+		args = append(args, "--write-thumbnail", "--convert-thumbnails", "jpg")
+	}
 	if j.AccountID == "youtube" && s.cfg.YouTubeBrowser != "" {
 		args = append(args, "--js-runtimes", "node")
 	}
@@ -282,9 +287,11 @@ func (s *Service) run(ctx context.Context, j *job) {
 		s.finish(j, "failed", errors.New(msg))
 		return
 	}
-	if err := s.updateCatalog(j, metadata, outputPath); err != nil {
-		s.finish(j, "failed", fmt.Errorf("write media catalog: %w", err))
-		return
+	if j.Mode != "audio" {
+		if err := s.updateCatalog(j, metadata, outputPath); err != nil {
+			s.finish(j, "failed", fmt.Errorf("write media catalog: %w", err))
+			return
+		}
 	}
 	j.Progress = 100
 	j.OutputPath = outputPath

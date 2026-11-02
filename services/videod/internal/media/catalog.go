@@ -144,7 +144,7 @@ func (s *Service) updateCatalog(j *job, raw map[string]any, outputPath string) e
 
 // RebuildCatalogFromDB refreshes each completed download's catalog metadata from SQLite.
 func (s *Service) RebuildCatalogFromDB() error {
-	rows, err := s.db.Query(`SELECT d.id,d.account_id,d.video_id,d.url,d.output_path,COALESCE(v.title,''),COALESCE(v.description,''),COALESCE(v.thumbnail,''),COALESCE(v.duration,0),COALESCE(v.published_at,''),COALESCE(c.title,''),COALESCE(c.id,'') FROM downloads d LEFT JOIN videos v ON v.id=d.video_id AND v.account_id=d.account_id LEFT JOIN channels c ON c.id=v.channel_id AND c.account_id=v.account_id WHERE d.state='completed' AND d.output_path<>'' ORDER BY d.created_at,d.id`)
+	rows, err := s.db.Query(`SELECT d.id,d.account_id,d.video_id,d.url,d.output_path,COALESCE(v.title,''),COALESCE(v.description,''),COALESCE(v.thumbnail,''),COALESCE(v.duration,0),COALESCE(v.published_at,''),COALESCE(c.title,''),COALESCE(c.id,'') FROM downloads d LEFT JOIN videos v ON v.id=d.video_id AND v.account_id=d.account_id LEFT JOIN channels c ON c.id=v.channel_id AND c.account_id=v.account_id WHERE d.state='completed' AND d.output_path<>'' AND d.mode<>'audio' ORDER BY d.created_at,d.id`)
 	if err != nil {
 		return err
 	}

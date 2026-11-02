@@ -278,11 +278,11 @@ func (s *Service) downloads(w http.ResponseWriter, r *http.Request) {
 // enqueue persists one queued download row and registers it in memory.
 
 // activeJobFor returns an in-flight job for the same account and video.
-func (s *Service) activeJobFor(account, videoID string) *job {
+func (s *Service) activeJobFor(account, videoID, mode string) *job {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, j := range s.jobs {
-		if j.AccountID != account || j.VideoID != videoID {
+		if j.AccountID != account || j.VideoID != videoID || j.Mode != mode {
 			continue
 		}
 		if j.State == "queued" || j.State == "downloading" || j.State == "paused" {
@@ -299,7 +299,7 @@ func (s *Service) enqueue(account, videoID, videoURL, mode, quality, bitrate str
 	// Two active jobs for one video write the same output file, and the second
 	// one then fails while renaming the first one's temporary file. Refuse the
 	// duplicate instead; a finished or failed job may be retried freely.
-	if dup := s.activeJobFor(account, videoID); dup != nil {
+	if dup := s.activeJobFor(account, videoID, mode); dup != nil {
 		return dup, http.StatusAccepted, "already_active", ""
 	}
 	s.writeMu.Lock()

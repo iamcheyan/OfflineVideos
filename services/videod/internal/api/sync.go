@@ -429,9 +429,8 @@ var _ SyncProvider = (*provider.YouTubeProvider)(nil)
 // unusedSQL keeps the database/sql import meaningful if helpers change.
 var _ = sql.ErrNoRows
 
-// autoEnqueue queues a download for each video that has no existing completed or
-// in-flight download. Duplicates are skipped rather than re-queued so repeated
-// syncs stay idempotent.
+// autoEnqueue ensures every synced video has a video file and a companion MP3.
+// Completed, failed, or in-flight jobs are kept unless audio is not yet MP3.
 func (h *Handler) autoEnqueue(ctx context.Context, account string, videos []domain.Video) (queued, skipped int, errs []string) {
 	if h.EnqueueDownload == nil {
 		return 0, len(videos), []string{"auto download: enqueue not configured"}
@@ -441,28 +440,31 @@ func (h *Handler) autoEnqueue(ctx context.Context, account string, videos []doma
 			skipped++
 			continue
 		}
-		var state string
-		err := h.DB.QueryRowContext(ctx,
-			`SELECT state FROM downloads WHERE account_id=? AND video_id=?
-			 ORDER BY id DESC LIMIT 1`, account, v.ID).Scan(&state)
-		if err == nil {
-			switch state {
-			case "completed", "downloading", "queued", "paused", "failed":
-				skipped++
+		queuedAny := false
+		for _, mode := range []string{"video", "audio"} {
+			var existing int
+			err := h.DB.QueryRowContext(ctx,
+				`SELECT count(*) FROM downloads WHERE account_id=? AND video_id=? AND mode=?
+				 AND (state IN ('downloading','queued','paused','failed') OR
+				      (state='completed' AND (mode='video' OR lower(output_path) LIKE '%.mp3')))`, account, v.ID, mode).Scan(&existing)
+			if err != nil {
+				errs = append(errs, "auto "+mode+" lookup "+v.ID+": "+err.Error())
 				continue
 			}
-		} else if err != sql.ErrNoRows {
-			errs = append(errs, "auto download lookup: "+err.Error())
-			continue
+			if existing > 0 {
+				continue
+			}
+			if _, err := h.EnqueueDownload(account, v.ID, v.URL, mode, "720p", "192", 0); err != nil {
+				errs = append(errs, "auto "+mode+" "+v.ID+": "+err.Error())
+				continue
+			}
+			queuedAny = true
 		}
-		if _, err := h.EnqueueDownload(account, v.ID, v.URL, "video", "720p", "192", 0); err != nil {
-			errs = append(errs, "auto download "+v.ID+": "+err.Error())
-			continue
+		if queuedAny {
+			queued++
+		} else {
+			skipped++
 		}
-		if _, err := h.EnqueueDownload(account, v.ID, v.URL, "audio", "720p", "192", 0); err != nil {
-			errs = append(errs, "auto audio "+v.ID+": "+err.Error())
-		}
-		queued++
 	}
 	return queued, skipped, errs
 }

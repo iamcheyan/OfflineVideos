@@ -2,7 +2,6 @@ package media
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -40,7 +39,7 @@ func (s *Service) library(w http.ResponseWriter, r *http.Request) {
 	} else if sortBy == "duration" {
 		order = "COALESCE(v.duration,0) DESC"
 	}
-	base := `SELECT COALESCE(v.id,d.video_id),d.account_id,COALESCE(v.channel_id,''),COALESCE(v.title,d.video_id),COALESCE(v.url,d.url),COALESCE(v.thumbnail,''),COALESCE(v.duration,0),COALESCE(v.published_at,''),COALESCE(v.description,''),d.mode,d.quality,d.output_path,COALESCE(m.since,'') FROM downloads d LEFT JOIN videos v ON v.id=d.video_id AND v.account_id=d.account_id LEFT JOIN remote_missing m ON m.video_id=d.video_id AND m.account_id=d.account_id WHERE d.state='completed' AND d.output_path<>''`
+	base := `SELECT COALESCE(v.id,d.video_id),d.account_id,COALESCE(v.channel_id,''),COALESCE(v.title,d.video_id),COALESCE(v.url,d.url),COALESCE(v.thumbnail,''),COALESCE(v.duration,0),COALESCE(v.published_at,''),COALESCE(v.description,''),d.mode,d.quality,d.output_path,COALESCE((SELECT a.output_path FROM downloads a WHERE a.account_id=d.account_id AND a.video_id=d.video_id AND a.mode='audio' AND a.state='completed' AND a.output_path<>'' ORDER BY a.created_at DESC,a.id DESC LIMIT 1),''),COALESCE(m.since,'') FROM downloads d LEFT JOIN videos v ON v.id=d.video_id AND v.account_id=d.account_id LEFT JOIN remote_missing m ON m.video_id=d.video_id AND m.account_id=d.account_id WHERE d.state='completed' AND d.output_path<>'' AND d.mode='video'`
 	args := []any{}
 	if accountParam != "" {
 		base += ` AND d.account_id=?`
@@ -62,16 +61,16 @@ func (s *Service) library(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	out := []map[string]any{}
 	for rows.Next() {
-		var id, aid, cid, title, url, thumb, pub, desc, mode, quality, path, missingSince string
+		var id, aid, cid, title, url, thumb, pub, desc, mode, quality, path, audioPath, missingSince string
 		var duration int
-		if err := rows.Scan(&id, &aid, &cid, &title, &url, &thumb, &duration, &pub, &desc, &mode, &quality, &path, &missingSince); err != nil {
+		if err := rows.Scan(&id, &aid, &cid, &title, &url, &thumb, &duration, &pub, &desc, &mode, &quality, &path, &audioPath, &missingSince); err != nil {
 			apiError(w, 500, "database_error", "unable to read offline library")
 			return
 		}
 		// remote_missing_since is only set when the source's list no longer
 		// contains the video, which is how a watched item is recognised. The
 		// app labels it and offers a delete; the file is never removed here.
-		out = append(out, map[string]any{"id": id, "account_id": aid, "channel_id": cid, "title": title, "url": url, "thumbnail": thumb, "duration": duration, "published_at": pub, "description": desc, "mode": mode, "quality": quality, "path": path, "remote_missing_since": missingSince})
+		out = append(out, map[string]any{"id": id, "account_id": aid, "channel_id": cid, "title": title, "url": url, "thumbnail": thumb, "duration": duration, "published_at": pub, "description": desc, "mode": mode, "quality": quality, "path": path, "audio_path": audioPath, "remote_missing_since": missingSince})
 	}
 	if err := rows.Err(); err != nil {
 		apiError(w, 500, "database_error", "unable to read offline library")
@@ -80,46 +79,46 @@ func (s *Service) library(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 
-// DeleteDownload removes the local file and the completed download row for one
-// video. It reports whether a file was actually removed.
-//
-// Path containment is enforced here rather than at the call site: the path
-// comes from the database, and a stale or hand-edited row must not be able to
-// delete anything outside the download root.
-// DeleteDownload removes a video's file and every queued/finished job row for
-// it. The bool reports whether a file was actually unlinked; callers that only
-// care about "the video is now clean" should treat a nil error as success.
+// DeleteDownload removes all local audio/video files and job rows for one video.
+// Path containment is enforced because stored paths come from the database.
 func (s *Service) DeleteDownload(ctx context.Context, account, videoID string) (bool, error) {
-	var path string
-	err := s.db.QueryRowContext(ctx, `SELECT output_path FROM downloads WHERE account_id=? AND video_id=? AND state='completed' ORDER BY created_at DESC LIMIT 1`, account, videoID).Scan(&path)
-	if errors.Is(err, sql.ErrNoRows) {
-		// Nothing landed on disk, but failed or cancelled rows may still exist.
-		// Clearing them is what lets the video be queued again.
-		_, derr := s.db.ExecContext(ctx, `DELETE FROM downloads WHERE account_id=? AND video_id=?`, account, videoID)
-		return false, derr
-	}
+	rows, err := s.db.QueryContext(ctx, `SELECT output_path FROM downloads WHERE account_id=? AND video_id=? AND state='completed' AND output_path<>''`, account, videoID)
 	if err != nil {
 		return false, err
 	}
-	if strings.TrimSpace(path) == "" {
-		_, err := s.db.ExecContext(ctx, `DELETE FROM downloads WHERE account_id=? AND video_id=?`, account, videoID)
+	var paths []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			rows.Close()
+			return false, err
+		}
+		paths = append(paths, path)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return false, err
+	}
+	if err := rows.Close(); err != nil {
 		return false, err
 	}
 	root, err := filepath.Abs(s.cfg.DownloadDir)
 	if err != nil {
 		return false, err
 	}
-	abs, err := filepath.Abs(path)
-	if err != nil || !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
-		return false, fmt.Errorf("%w: %s", ErrPathOutsideLibrary, path)
-	}
 	removed := false
-	if err = os.Remove(abs); err != nil {
-		if !os.IsNotExist(err) {
-			return false, err
+	for _, path := range paths {
+		abs, err := filepath.Abs(path)
+		if err != nil || !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
+			return removed, fmt.Errorf("%w: %s", ErrPathOutsideLibrary, path)
 		}
-	} else {
-		removed = true
+		if err = os.Remove(abs); err != nil {
+			if !os.IsNotExist(err) {
+				return removed, err
+			}
+		} else {
+			removed = true
+		}
 	}
 	// Drop every row for this video, not just the completed one. A leftover
 	// failed job would otherwise make the app treat the video as "already
@@ -159,8 +158,16 @@ func (s *Service) mediaStream(w http.ResponseWriter, r *http.Request) {
 		apiError(w, 500, "account_unavailable", "active account unavailable")
 		return
 	}
+	mode := r.URL.Query().Get("mode")
+	if mode == "" {
+		mode = "video"
+	}
+	if mode != "video" && mode != "audio" {
+		apiError(w, 400, "invalid_mode", "unsupported media mode")
+		return
+	}
 	var path string
-	err = s.db.QueryRowContext(r.Context(), `SELECT output_path FROM downloads WHERE account_id=? AND video_id=? AND state='completed' AND output_path<>'' ORDER BY created_at DESC LIMIT 1`, account, r.PathValue("video_id")).Scan(&path)
+	err = s.db.QueryRowContext(r.Context(), `SELECT output_path FROM downloads WHERE account_id=? AND video_id=? AND mode=? AND state='completed' AND output_path<>'' ORDER BY created_at DESC LIMIT 1`, account, r.PathValue("video_id"), mode).Scan(&path)
 	if err != nil {
 		apiError(w, 404, "media_not_found", "offline media not found")
 		return

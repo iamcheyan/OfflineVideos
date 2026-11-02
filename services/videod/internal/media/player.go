@@ -28,6 +28,7 @@ func (s *Service) playerAction(w http.ResponseWriter, r *http.Request) {
 		var in struct {
 			VideoID string `json:"video_id"`
 			URL     string `json:"url"`
+			Mode    string `json:"mode"`
 		}
 		if decodeJSON(r, &in) != nil {
 			apiError(w, 400, "invalid_request", "video_id or url required")
@@ -38,7 +39,23 @@ func (s *Service) playerAction(w http.ResponseWriter, r *http.Request) {
 			apiError(w, 500, "account_unavailable", "active account unavailable")
 			return
 		}
-		if in.URL == "" {
+		if in.Mode == "" {
+			in.Mode = "video"
+		}
+		if in.Mode != "video" && in.Mode != "audio" {
+			apiError(w, 400, "invalid_mode", "unsupported media mode")
+			return
+		}
+		if in.Mode == "audio" {
+			if in.VideoID == "" {
+				apiError(w, 400, "invalid_request", "video_id is required for audio playback")
+				return
+			}
+			if err := s.db.QueryRowContext(r.Context(), `SELECT output_path FROM downloads WHERE account_id=? AND video_id=? AND mode='audio' AND state='completed' AND output_path<>'' ORDER BY created_at DESC,id DESC LIMIT 1`, account, in.VideoID).Scan(&in.URL); err != nil {
+				apiError(w, 404, "audio_not_found", "offline audio not found")
+				return
+			}
+		} else if in.URL == "" {
 			if in.VideoID == "" {
 				apiError(w, 400, "invalid_request", "video_id or url required")
 				return
@@ -48,7 +65,10 @@ func (s *Service) playerAction(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		resume := s.resumePosition(account, in.VideoID)
+		resume := 0.0
+		if in.Mode == "video" {
+			resume = s.resumePosition(account, in.VideoID)
+		}
 		p, err := s.launch(in.URL, resume)
 		if err != nil {
 			apiError(w, 503, "player_unavailable", "unable to start mpv")

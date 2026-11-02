@@ -95,7 +95,7 @@ func newCatalogTestService(t *testing.T, root string) (*Service, *sql.DB) {
 		`CREATE TABLE accounts(id TEXT PRIMARY KEY)`,
 		`CREATE TABLE channels(id TEXT,account_id TEXT,title TEXT)`,
 		`CREATE TABLE videos(id TEXT,account_id TEXT,channel_id TEXT,title TEXT,description TEXT,thumbnail TEXT,duration INTEGER,published_at TEXT)`,
-		`CREATE TABLE downloads(id INTEGER PRIMARY KEY,account_id TEXT,video_id TEXT,url TEXT,state TEXT,output_path TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)`,
+		`CREATE TABLE downloads(id INTEGER PRIMARY KEY,account_id TEXT,video_id TEXT,url TEXT,mode TEXT DEFAULT 'video',state TEXT,output_path TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)`,
 	}
 	for _, stmt := range stmts {
 		if _, err = db.Exec(stmt); err != nil {
