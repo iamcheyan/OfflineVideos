@@ -26,6 +26,10 @@ type Config struct {
 	YouTubeBrowser                          string
 }
 
+type notificationBatch struct {
+	Account string
+	Titles  []string
+}
 type Service struct {
 	db             *sql.DB
 	cfg            Config
@@ -35,7 +39,7 @@ type Service struct {
 	players        map[string]*player
 	paused, closed bool
 	nextRequestID  uint64
-	notifyPending  map[string]int
+	notifyPending  map[string][]string
 }
 
 type job struct {
@@ -107,7 +111,7 @@ func New(db *sql.DB, cfg Config) (*Service, error) {
 	if err := os.MkdirAll(cfg.IPCDir, 0700); err != nil {
 		return nil, err
 	}
-	s := &Service{db: db, cfg: cfg, jobs: make(map[int64]*job), players: make(map[string]*player), notifyPending: make(map[string]int)}
+	s := &Service{db: db, cfg: cfg, jobs: make(map[int64]*job), players: make(map[string]*player), notifyPending: make(map[string][]string)}
 	if err := s.restoreJobs(context.Background()); err != nil {
 		return nil, err
 	}

@@ -290,15 +290,19 @@ func (s *Service) run(ctx context.Context, j *job) {
 	_ = s.persistLocked(j)
 	s.mu.Unlock()
 	if s.cfg.Notifier != nil {
-		s.queueCompletionNotice(j.AccountID)
+		var title string
+		if metadata != nil {
+			title, _ = metadata["title"].(string)
+		}
+		s.queueCompletionNotice(j.AccountID, title)
 	}
 	s.kick()
 }
 
-func (s *Service) queueCompletionNotice(account string) {
+func (s *Service) queueCompletionNotice(account, title string) {
 	s.mu.Lock()
-	s.notifyPending[account]++
-	pending := s.notifyPending[account]
+	s.notifyPending[account] = append(s.notifyPending[account], title)
+	pending := len(s.notifyPending[account])
 	s.mu.Unlock()
 	if pending != 1 {
 		return
@@ -306,13 +310,21 @@ func (s *Service) queueCompletionNotice(account string) {
 	go func() {
 		time.Sleep(10 * time.Second)
 		s.mu.Lock()
-		count := s.notifyPending[account]
+		titles := s.notifyPending[account]
 		delete(s.notifyPending, account)
 		s.mu.Unlock()
-		if count == 0 {
+		if len(titles) == 0 {
 			return
 		}
-		message := fmt.Sprintf("✅ OfflineVideos 缓存摘要：本批次成功下载 %d 个视频（%s）。NAS：%s", count, account, s.cfg.DownloadDir)
+		message := fmt.Sprintf("✅ OfflineVideos 缓存摘要：本批次成功下载 %d 个视频（%s）。", len(titles), account)
+		if len(titles) <= 8 {
+			for _, t := range titles {
+				message += "\n• " + t
+			}
+		} else {
+			message += "（视频数量较多，仅显示数量）"
+		}
+		message += "\nNAS：" + s.cfg.DownloadDir
 		if err := s.cfg.Notifier.Send(context.Background(), message); err != nil {
 			log.Printf("download summary notification failed account=%s: %v", account, err)
 		}
