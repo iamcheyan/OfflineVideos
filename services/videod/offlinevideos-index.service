@@ -2,6 +2,7 @@
 Description=Rebuild OfflineVideos JSON catalog hourly
 After=offlinevideos.service
 Requires=offlinevideos.service
+OnSuccess=offlinevideos-publish.service
 
 [Service]
 Type=oneshot
