@@ -44,6 +44,8 @@ async function load(){
  if(!r.ok){document.getElementById('meta').textContent='カタログを読み込めませんでした';return;}
  const data=await r.json();
  items=data.items||[];
+ const stamp=v=>{const t=Date.parse(v.downloaded_at||'');return Number.isFinite(t)?t:0};
+ items.sort((a,b)=>stamp(b)-stamp(a));
  const updated=data.updated_at?new Date(data.updated_at).toLocaleString('ja-JP'):'不明';
  document.getElementById('meta').textContent=`更新: ${updated} / ${items.length}件`;
  render();

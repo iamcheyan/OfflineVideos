@@ -72,6 +72,7 @@ def load_catalog(raw: bytes, require_source_url: bool = True) -> dict:
         "uploader",
         "channel",
         "duration_seconds",
+        "downloaded_at",
         "thumbnail_file",
         "thumbnail_url",
     )

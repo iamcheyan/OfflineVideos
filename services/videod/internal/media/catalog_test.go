@@ -84,6 +84,41 @@ func TestCatalogRebuildIgnoresLegacyOutputPath(t *testing.T) {
 	}
 }
 
+func TestCatalogRebuildKeepsDownloadTime(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"old.mp4", "new.mp4"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("media"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service, db := newCatalogTestService(t, root)
+	defer db.Close()
+	if _, err := db.Exec(`INSERT INTO downloads(account_id,video_id,url,state,output_path,created_at) VALUES
+		('youtube','old','https://youtube.example/watch?v=old','completed',?,'2026-01-02 03:04:05'),
+		('youtube','new','https://youtube.example/watch?v=new','completed',?,'2026-02-03 04:05:06')`,
+		filepath.Join(root, "old.mp4"), filepath.Join(root, "new.mp4")); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.RebuildCatalogFromDB(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, catalogName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got catalog
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	stamps := map[string]string{}
+	for _, item := range got.Items {
+		stamps[item.ID] = item.DownloadedAt
+	}
+	if stamps["old"] != "2026-01-02T03:04:05Z" || stamps["new"] != "2026-02-03T04:05:06Z" {
+		t.Fatalf("rebuild must keep queue time, got %+v", stamps)
+	}
+}
+
 func newCatalogTestService(t *testing.T, root string) (*Service, *sql.DB) {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")

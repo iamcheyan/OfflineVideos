@@ -54,6 +54,14 @@ type catalogItem struct {
 }
 
 func (s *Service) updateCatalog(j *job, raw map[string]any, outputPath string) error {
+	return s.updateCatalogAt(j, raw, outputPath, time.Now().UTC())
+}
+
+// updateCatalogAt writes one item with an explicit download timestamp. The
+// hourly catalog rebuild passes the download row's created_at so the
+// published ordering reflects when a video entered the queue, not when the
+// rebuild happened to run.
+func (s *Service) updateCatalogAt(j *job, raw map[string]any, outputPath string, downloadedAt time.Time) error {
 	if raw == nil {
 		raw = map[string]any{}
 	}
@@ -89,7 +97,7 @@ func (s *Service) updateCatalog(j *job, raw map[string]any, outputPath string) e
 	if title == "" {
 		title = id
 	}
-	item := catalogItem{ID: id, Source: j.AccountID, SourceURL: nonEmpty(stringValue(raw["webpage_url"]), j.URL), Title: title, Description: stringValue(raw["description"]), ThumbnailURL: stringValue(raw["thumbnail"]), Uploader: nonEmpty(stringValue(raw["uploader"]), stringValue(raw["channel"])), UploaderID: stringValue(raw["uploader_id"]), Channel: stringValue(raw["channel"]), ChannelID: stringValue(raw["channel_id"]), Duration: numberValue(raw["duration"]), UploadDate: stringValue(raw["upload_date"]), ReleaseDate: stringValue(raw["release_date"]), Timestamp: numberValue(raw["timestamp"]), ViewCount: int64Value(raw["view_count"]), LikeCount: int64Value(raw["like_count"]), LiveStatus: stringValue(raw["live_status"]), Availability: stringValue(raw["availability"]), Extractor: stringValue(raw["extractor"]), ExtractorKey: stringValue(raw["extractor_key"]), Format: stringValue(raw["format"]), FormatID: stringValue(raw["format_id"]), Ext: stringValue(raw["ext"]), Width: int(numberValue(raw["width"])), Height: int(numberValue(raw["height"])), Filesize: int64Value(raw["filesize"]), File: filepath.ToSlash(rel), ThumbnailFile: thumbRel, ThumbnailDownloaded: thumbOK, DownloadedAt: time.Now().UTC().Format(time.RFC3339Nano), Metadata: raw}
+	item := catalogItem{ID: id, Source: j.AccountID, SourceURL: nonEmpty(stringValue(raw["webpage_url"]), j.URL), Title: title, Description: stringValue(raw["description"]), ThumbnailURL: stringValue(raw["thumbnail"]), Uploader: nonEmpty(stringValue(raw["uploader"]), stringValue(raw["channel"])), UploaderID: stringValue(raw["uploader_id"]), Channel: stringValue(raw["channel"]), ChannelID: stringValue(raw["channel_id"]), Duration: numberValue(raw["duration"]), UploadDate: stringValue(raw["upload_date"]), ReleaseDate: stringValue(raw["release_date"]), Timestamp: numberValue(raw["timestamp"]), ViewCount: int64Value(raw["view_count"]), LikeCount: int64Value(raw["like_count"]), LiveStatus: stringValue(raw["live_status"]), Availability: stringValue(raw["availability"]), Extractor: stringValue(raw["extractor"]), ExtractorKey: stringValue(raw["extractor_key"]), Format: stringValue(raw["format"]), FormatID: stringValue(raw["format_id"]), Ext: stringValue(raw["ext"]), Width: int(numberValue(raw["width"])), Height: int(numberValue(raw["height"])), Filesize: int64Value(raw["filesize"]), File: filepath.ToSlash(rel), ThumbnailFile: thumbRel, ThumbnailDownloaded: thumbOK, DownloadedAt: downloadedAt.UTC().Format(time.RFC3339Nano), Metadata: raw}
 	catalogMu.Lock()
 	defer catalogMu.Unlock()
 	indexPath := filepath.Join(root, catalogName)
@@ -144,23 +152,24 @@ func (s *Service) updateCatalog(j *job, raw map[string]any, outputPath string) e
 
 // RebuildCatalogFromDB refreshes each completed download's catalog metadata from SQLite.
 func (s *Service) RebuildCatalogFromDB() error {
-	rows, err := s.db.Query(`SELECT d.id,d.account_id,d.video_id,d.url,d.output_path,COALESCE(v.title,''),COALESCE(v.description,''),COALESCE(v.thumbnail,''),COALESCE(v.duration,0),COALESCE(v.published_at,''),COALESCE(c.title,''),COALESCE(c.id,'') FROM downloads d LEFT JOIN videos v ON v.id=d.video_id AND v.account_id=d.account_id LEFT JOIN channels c ON c.id=v.channel_id AND c.account_id=v.account_id WHERE d.state='completed' AND d.output_path<>'' AND d.mode<>'audio' ORDER BY d.created_at,d.id`)
+	rows, err := s.db.Query(`SELECT d.id,d.account_id,d.video_id,d.url,d.output_path,COALESCE(v.title,''),COALESCE(v.description,''),COALESCE(v.thumbnail,''),COALESCE(v.duration,0),COALESCE(v.published_at,''),COALESCE(c.title,''),COALESCE(c.id,''),d.created_at FROM downloads d LEFT JOIN videos v ON v.id=d.video_id AND v.account_id=d.account_id LEFT JOIN channels c ON c.id=v.channel_id AND c.account_id=v.account_id WHERE d.state='completed' AND d.output_path<>'' AND d.mode<>'audio' ORDER BY d.created_at,d.id`)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var j job
-		var path, title, description, thumbnail, published, channel, channelID string
+		var path, title, description, thumbnail, published, channel, channelID, created string
 		var duration int
-		if err := rows.Scan(&j.ID, &j.AccountID, &j.VideoID, &j.URL, &path, &title, &description, &thumbnail, &duration, &published, &channel, &channelID); err != nil {
+		if err := rows.Scan(&j.ID, &j.AccountID, &j.VideoID, &j.URL, &path, &title, &description, &thumbnail, &duration, &published, &channel, &channelID, &created); err != nil {
 			return err
 		}
 		meta := map[string]any{"id": j.VideoID, "title": title, "description": description, "thumbnail": thumbnail, "duration": duration, "upload_date": strings.ReplaceAll(strings.Split(published, "T")[0], "-", ""), "channel": channel, "channel_id": channelID, "webpage_url": j.URL}
 		if !withinDirectory(s.cfg.DownloadDir, path) {
 			continue
 		}
-		if err := s.updateCatalog(&j, meta, path); err != nil {
+		at := parseDownloadedAt(created)
+		if err := s.updateCatalogAt(&j, meta, path, at); err != nil {
 			return err
 		}
 	}
@@ -208,6 +217,20 @@ func (s *Service) writeEmptyCatalog() error {
 	}
 	return os.Rename(name, indexPath)
 }
+
+// parseDownloadedAt converts a downloads.created_at value (SQLite's
+// CURRENT_TIMESTAMP or RFC 3339) into a time; unparseable values fall back to
+// now so a catalog entry still receives a timestamp.
+func parseDownloadedAt(raw string) time.Time {
+	raw = strings.TrimSpace(raw)
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05"} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t.UTC()
+		}
+	}
+	return time.Now().UTC()
+}
+
 func withinDirectory(root, path string) bool {
 	r, e := filepath.Abs(root)
 	if e != nil {
