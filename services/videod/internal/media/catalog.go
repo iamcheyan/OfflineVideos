@@ -125,10 +125,16 @@ func (s *Service) updateCatalogAt(j *job, raw map[string]any, outputPath string,
 		idx.Items = append(idx.Items, item)
 	}
 	idx.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	return writeCatalogFile(root, idx)
+}
+
+// writeCatalogFile atomically replaces the catalog document.
+func writeCatalogFile(root string, idx catalog) error {
 	encoded, err := json.MarshalIndent(idx, "", "  ")
 	if err != nil {
 		return err
 	}
+	indexPath := filepath.Join(root, catalogName)
 
 	tmp, err := os.CreateTemp(root, ".index-*.json")
 	if err != nil {
@@ -150,8 +156,106 @@ func (s *Service) updateCatalogAt(j *job, raw map[string]any, outputPath string,
 	return os.Rename(tmpName, indexPath)
 }
 
+// removeCatalogItem drops one source/id entry, used when its download is
+// deleted. The rebuild also prunes stale entries, but a delete must disappear
+// from the published catalog before the next hourly pass.
+func (s *Service) removeCatalogItem(account, videoID string) error {
+	root, err := filepath.Abs(s.cfg.DownloadDir)
+	if err != nil {
+		return err
+	}
+	catalogMu.Lock()
+	defer catalogMu.Unlock()
+	idx, err := readCatalogFile(root)
+	if err != nil || len(idx.Items) == 0 {
+		return err
+	}
+	kept := idx.Items[:0]
+	for _, item := range idx.Items {
+		if item.Source == account && item.ID == videoID {
+			continue
+		}
+		kept = append(kept, item)
+	}
+	if len(kept) == len(idx.Items) {
+		return nil
+	}
+	idx.Items = kept
+	idx.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	return writeCatalogFile(root, idx)
+}
+
+// pruneCatalog drops entries that no completed download backs any more, so a
+// deleted file cannot survive in the published catalog.
+func (s *Service) pruneCatalog(seen map[string]bool) error {
+	root, err := filepath.Abs(s.cfg.DownloadDir)
+	if err != nil {
+		return err
+	}
+	catalogMu.Lock()
+	defer catalogMu.Unlock()
+	idx, err := readCatalogFile(root)
+	if err != nil {
+		return err
+	}
+	kept := idx.Items[:0]
+	for _, item := range idx.Items {
+		if seen[item.Source+"\x00"+item.ID] {
+			kept = append(kept, item)
+		}
+	}
+	if len(kept) == len(idx.Items) {
+		return nil
+	}
+	idx.Items = kept
+	idx.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	return writeCatalogFile(root, idx)
+}
+
+func readCatalogFile(root string) (catalog, error) {
+	indexPath := filepath.Join(root, catalogName)
+	data, err := os.ReadFile(indexPath)
+	idx := catalog{Version: 1, Items: []catalogItem{}}
+	if err == nil {
+		if err = json.Unmarshal(data, &idx); err != nil {
+			return idx, err
+		}
+		if idx.Version == 0 {
+			idx.Version = 1
+		}
+		return idx, nil
+	}
+	if os.IsNotExist(err) {
+		return idx, nil
+	}
+	return idx, err
+}
+
 // RebuildCatalogFromDB refreshes each completed download's catalog metadata from SQLite.
 func (s *Service) RebuildCatalogFromDB() error {
+	// Collect known rows first: the service may run on a single connection,
+	// and holding one cursor open while opening another would block.
+	seen := make(map[string]bool)
+	known, err := s.db.Query(`SELECT DISTINCT account_id, video_id FROM downloads WHERE state='completed' AND mode<>'audio'`)
+	if err != nil {
+		return err
+	}
+	for known.Next() {
+		var account, videoID string
+		if err := known.Scan(&account, &videoID); err != nil {
+			known.Close()
+			return err
+		}
+		seen[account+"\x00"+videoID] = true
+	}
+	if err := known.Err(); err != nil {
+		known.Close()
+		return err
+	}
+	if err := known.Close(); err != nil {
+		return err
+	}
+
 	rows, err := s.db.Query(`SELECT d.id,d.account_id,d.video_id,d.url,d.output_path,COALESCE(v.title,''),COALESCE(v.description,''),COALESCE(v.thumbnail,''),COALESCE(v.duration,0),COALESCE(v.published_at,''),COALESCE(c.title,''),COALESCE(c.id,''),d.created_at FROM downloads d LEFT JOIN videos v ON v.id=d.video_id AND v.account_id=d.account_id LEFT JOIN channels c ON c.id=v.channel_id AND c.account_id=v.account_id WHERE d.state='completed' AND d.output_path<>'' AND d.mode<>'audio' ORDER BY d.created_at,d.id`)
 	if err != nil {
 		return err
@@ -174,6 +278,9 @@ func (s *Service) RebuildCatalogFromDB() error {
 		}
 	}
 	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := s.pruneCatalog(seen); err != nil {
 		return err
 	}
 	indexPath := filepath.Join(s.cfg.DownloadDir, catalogName)

@@ -119,6 +119,79 @@ func TestCatalogRebuildKeepsDownloadTime(t *testing.T) {
 	}
 }
 
+func TestCatalogRebuildPrunesDeletedEntries(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "gone.mp4"), []byte("media"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, db := newCatalogTestService(t, root)
+	defer db.Close()
+	if err := writeCatalogFile(root, catalog{Version: 1, Items: []catalogItem{{ID: "gone", Source: "bilibili", Title: "gone"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.RebuildCatalogFromDB(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, catalogName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got catalog
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Items) != 0 {
+		t.Fatalf("entry without a download row must be pruned: %+v", got.Items)
+	}
+}
+
+func TestCatalogRebuildKeepsLegacyRootEntry(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "legacy.mp4")
+	if err := os.WriteFile(outside, []byte("media"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, db := newCatalogTestService(t, root)
+	defer db.Close()
+	if _, err := db.Exec(`INSERT INTO downloads(account_id,video_id,url,state,output_path) VALUES('youtube','legacy','https://youtube.example/watch?v=legacy','completed',?)`, outside); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCatalogFile(root, catalog{Version: 1, Items: []catalogItem{{ID: "legacy", Source: "youtube", Title: "legacy"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.RebuildCatalogFromDB(); err != nil {
+		t.Fatal(err)
+	}
+	idx, err := readCatalogFile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(idx.Items) != 1 || idx.Items[0].ID != "legacy" {
+		t.Fatalf("legacy row must stay published: %+v", idx.Items)
+	}
+}
+
+func TestRemoveCatalogItemDropsOnlyMatch(t *testing.T) {
+	root := t.TempDir()
+	service := &Service{cfg: Config{DownloadDir: root}}
+	if err := writeCatalogFile(root, catalog{Version: 1, Items: []catalogItem{
+		{ID: "keep", Source: "bilibili", Title: "keep"},
+		{ID: "drop", Source: "bilibili", Title: "drop"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.removeCatalogItem("bilibili", "drop"); err != nil {
+		t.Fatal(err)
+	}
+	idx, err := readCatalogFile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(idx.Items) != 1 || idx.Items[0].ID != "keep" {
+		t.Fatalf("unexpected items after remove: %+v", idx.Items)
+	}
+}
+
 func newCatalogTestService(t *testing.T, root string) (*Service, *sql.DB) {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")

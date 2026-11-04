@@ -127,6 +127,9 @@ func (s *Service) DeleteDownload(ctx context.Context, account, videoID string) (
 	if _, err = s.db.ExecContext(ctx, `DELETE FROM downloads WHERE account_id=? AND video_id=?`, account, videoID); err != nil {
 		return removed, err
 	}
+	if err = s.removeCatalogItem(account, videoID); err != nil {
+		return removed, fmt.Errorf("update media catalog: %w", err)
+	}
 	return removed, nil
 }
 
