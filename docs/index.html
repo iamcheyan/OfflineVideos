@@ -40,7 +40,7 @@ button.filter.active{background:var(--accent);border-color:var(--accent);color:#
 <script>
 let items=[];
 async function load(){
- const r=await fetch('data/catalog.json');
+ const r=await fetch('data/catalog.json?t='+Date.now(), {cache:'no-store'});
  if(!r.ok){document.getElementById('meta').textContent='カタログを読み込めませんでした';return;}
  const data=await r.json();
  items=data.items||[];
